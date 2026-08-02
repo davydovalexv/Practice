@@ -1,0 +1,15 @@
+# В репозитории только dv-agent; остальное — локально
+/*
+!/dv-agent/
+!.gitignore
+
+# Локальные артефакты dv-agent
+dv-agent/.venv/
+dv-agent/.pytest_cache/
+dv-agent/output/*
+!dv-agent/output/.gitkeep
+
+# Личные документы
+*.docx
+*.pdf
+*.pptx

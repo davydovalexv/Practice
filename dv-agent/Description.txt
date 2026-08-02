@@ -1,0 +1,551 @@
+# DV Agent — локальный агент Data Vault 2.0
+
+AI-агент на базе **Qwen (Ollama)** для анализа исходных SQL-схем и предложения разметки **hub / satellite / link** по методологии Data Vault 2.0. Работает полностью локально, без облачных API (после первоначальной загрузки модели).
+
+**Рекомендуемый способ работы:** Docker Compose + веб-интерфейс Streamlit на http://localhost:8501.
+
+---
+
+## Как работать с сервисом
+
+### Что вы получите в итоге
+
+```
+SQL-файлы (.sql / .ddl)
+        ↓  парсинг DDL
+Список таблиц + ER-диаграмма + предпросмотр данных
+        ↓  классификация LLM (Qwen)
+JSON-каталог разметки (hub / satellite / link)
+        ↓  ручная проверка в UI
+classification_working.json  →  (далее) генератор Raw Vault DDL
+```
+
+Все результаты сохраняются в папку `output/` на вашем компьютере.
+
+---
+
+### Первый запуск (один раз на этом ПК)
+
+**Нужно:** Docker, Docker Compose, ~8 GB RAM, интернет (скачивание образов и модели ~4.7 GB).
+
+#### Шаг 1. Перейти в каталог проекта
+
+```bash
+cd ~/Study/Mentors_seminar/Practice/dv-agent
+chmod +x docker/up.sh docker/down.sh docker/compose
+```
+
+#### Шаг 2. Запустить стек
+
+```bash
+sudo docker compose up -d --build
+```
+
+> **Почему `sudo`?** Перед стартом сервис `stop-host-ollama` останавливает Ollama на хосте (`systemctl`), чтобы освободить порт **11434**. При `docker compose down` host Ollama тоже останавливается.
+
+**Что происходит при первом запуске:**
+
+| Этап | Сервис | Сколько ждать |
+|------|--------|---------------|
+| Сборка образов | `ui`, `ollama`, `stop-host-ollama` | 2–10 мин |
+| Старт PostgreSQL | `postgres` | ~10–30 сек |
+| Старт Ollama | `ollama` | ~20–60 сек |
+| Загрузка модели | `ollama-init` → `ollama pull qwen2.5-coder:7b` | **10–30 мин** (интернет) |
+| Запуск UI | `ui` | после успешного `ollama-init` |
+
+Следить за загрузкой модели:
+
+```bash
+docker compose logs -f ollama-init
+# ждите строку: ==> Модель готова
+```
+
+Проверить, что всё поднялось:
+
+```bash
+docker compose ps
+# ollama, postgres, ui — Up; ollama-init — Exited (0)
+```
+
+#### Шаг 3. Открыть веб-интерфейс
+
+Браузер: **http://localhost:8501**
+
+В шапке должно быть **«UI v0.2»**. Вверху три метрики:
+- **Ollama** — должно быть `OK` (не «ошибка»)
+- **Модель** — `qwen2.5-coder:7b`
+- **Таймаут** — секунд на таблицу
+
+Если Ollama показывает ошибку — см. [Устранение неполадок](#устранение-неполадок).
+
+#### Шаг 4. Первый рабочий сценарий в UI
+
+1. **Загрузка SQL** (шаг 1 на экране)
+   - Перетащите `.sql` / `.ddl` файлы **или**
+   - Выберите «Примеры из data/sql» → файл `oil/wells_production_deliveries.sql`
+   - При upload нажмите **«Сохранить файлы»**
+
+2. **Парсинг** (шаг 2)
+   - Выберите файлы для разбора (multiselect)
+   - Нажмите **«Разобрать SQL»**
+   - Появится таблица с колонками, ER-диаграмма Mermaid, предпросмотр данных (до 30 строк)
+
+3. **Классификация** (шаг 3)
+   - Выберите **1 таблицу** для первого прогона (на CPU это 5–15 мин на таблицу)
+   - Таймаут: 600 сек (можно увеличить до 900 для больших схем)
+   - Нажмите **«Запустить классификацию»**
+
+4. **Прогресс** (шаг 4)
+   - Полоса прогресса, журнал, ETA после каждой таблицы
+   - Первый запрос к модели на CPU может занять **2–5 мин** (загрузка в память) — это нормально
+
+5. **Правка разметки** (внизу экрана)
+   - Откройте `classification_proposed.json`
+   - Исправьте `dv_type`, `dv_role`, `status` (`proposed` → `approved`)
+   - **«Сохранить рабочую копию»** → `output/classification_working.json`
+
+**Первый полный цикл на CPU:** заложите **30–60 мин** (модель + 1–3 таблицы).
+
+---
+
+### Последующие запуски (каждый день)
+
+Модель и образы уже на диске — старт **намного быстрее** (1–3 мин).
+
+#### Запуск
+
+```bash
+cd ~/Study/Mentors_seminar/Practice/dv-agent
+sudo docker compose up -d
+```
+
+Эквивалент:
+
+```bash
+sudo ./docker/up.sh
+# или
+sudo make up
+```
+
+`ollama-init` при повторном запуске быстро проверит модель (pull только если её нет).
+
+#### Работа
+
+1. Откройте http://localhost:8501
+2. Загрузите новые SQL или выберите файлы из рабочей папки `output/uploads/workspace/`
+3. **Разобрать SQL** → **Запустить классификацию** → **Правка разметки**
+
+Результаты предыдущих сессий остаются в `output/` — UI подхватит `classification_proposed.json` автоматически.
+
+#### Остановка
+
+```bash
+sudo docker compose down
+```
+
+Эквивалент: `sudo ./docker/down.sh` или `sudo make down`.
+
+После остановки порт **11434** свободен — следующий `up` пройдёт без конфликта с host Ollama.
+
+#### Перезапуск только UI (после правок кода)
+
+Код монтируется из `./src` и `./config` — пересборка не нужна:
+
+```bash
+docker compose restart ui
+```
+
+---
+
+### Работа в веб-интерфейсе (подробно)
+
+Один экран, шаги сверху вниз.
+
+#### Шаг 1. Загрузка SQL
+
+| Источник | Когда использовать |
+|----------|-------------------|
+| **Загрузить файлы** | Свои `.sql` / `.ddl` с компьютера → сохраняются в `output/uploads/workspace/` |
+| **Путь на диске** | Файл или каталог внутри контейнера, напр. `/data/sql/oil` |
+| **Примеры** | Готовые файлы из `data/sql/` (нефтегаз, CRM) |
+
+#### Шаг 2. Парсинг DDL
+
+- Multiselect — какие файлы разбирать
+- **Разобрать SQL** — аналог CLI `dv-agent inspect-sql`
+- Результат: список таблиц, предупреждения парсера, **Mermaid ER-диаграмма**, **данные таблиц** (первые 30 строк из INSERT или PostgreSQL)
+
+#### Шаг 3. Классификация
+
+- Multiselect таблиц — можно по одной (быстрее на CPU)
+- **Таймаут** — максимум секунд на одну таблицу (по умолчанию 600)
+- **Пропустить прогрев** — не делать отдельный короткий запрос перед классификацией; первая таблица всё равно может быть долгой на CPU
+- **Запустить классификацию** — аналог CLI `dv-agent propose`
+
+#### Шаг 4. Прогресс
+
+- Прогресс-бар, лог по таблицам, **ETA** (среднее время × оставшиеся таблицы)
+- При обрыве частичный результат сохраняется в `output/classification_proposed.json`
+
+#### Шаг 5. Итоги + правка
+
+- Метрики: столбцов / hub / satellite / link
+- Секция **«Правка разметки»**: фильтры, редактирование, сохранение
+  - **Сохранить в proposed** — перезаписать предложение
+  - **Сохранить рабочую копию** — `classification_working.json` (основной результат после review)
+
+---
+
+### Работа через CLI (альтернатива UI)
+
+Контейнер агента (profile `cli`):
+
+```bash
+# Проверка
+docker compose run --rm agent status
+docker compose run --rm agent llm-status
+
+# Парсинг
+docker compose run --rm agent inspect-sql -p /data/sql/oil
+
+# Классификация (долго на CPU)
+docker compose run --rm agent propose -p /data/sql/oil/wells_production_deliveries.sql -t wells
+
+# Эталон из PostgreSQL (без LLM, для проверки UI)
+docker compose run --rm agent export-meta
+```
+
+Локально (без Docker-образа агента, нужны Ollama + PostgreSQL):
+
+```bash
+source .venv/bin/activate
+dv-agent inspect-sql -p /path/to/sql/
+dv-agent propose -p /path/to/sql/ -t table_name --timeout 900
+dv-agent-ui   # Streamlit на :8501
+```
+
+---
+
+### Куда смотреть результаты
+
+| Файл | Описание |
+|------|----------|
+| `output/classification_proposed.json` | Предложения LLM |
+| `output/classification_working.json` | Рабочая копия после правок в UI |
+| `output/uploads/workspace/` | Загруженные SQL-файлы |
+
+---
+
+### Порты и сервисы
+
+| Сервис | URL / порт | Назначение |
+|--------|------------|------------|
+| Streamlit UI | http://localhost:8501 | Основной интерфейс |
+| PostgreSQL | localhost:5432 | Эталон `dv_meta`, примеры `src` |
+| Ollama API | http://localhost:11434 | LLM (внутри Docker — `http://ollama:11434`) |
+
+Проверка модели:
+
+```bash
+docker compose exec ollama ollama list
+```
+
+---
+
+## Структура проекта
+
+```
+dv-agent/
+├── docker-compose.yml      # postgres + ollama + ui + agent (cli)
+├── docker/
+│   ├── up.sh / down.sh     # запуск/остановка (+ host Ollama)
+│   ├── ollama/             # образ Ollama с остановкой host при down
+│   └── postgres/init/      # init БД (src + dv_meta)
+├── data/sql/               # примеры SQL
+├── config/
+│   ├── default.yaml        # локальная разработка
+│   ├── docker.yaml         # настройки внутри Docker
+│   ├── dv_rules.yaml       # правила DV 2.0
+│   └── few_shot_examples.yaml
+├── src/dv_agent/           # код агента и UI
+├── output/                 # JSON, uploads (монтируется в Docker)
+└── tests/
+```
+
+---
+
+## Требования
+
+**Docker (рекомендуется):**
+
+- Docker и Docker Compose
+- ~8 GB RAM
+- Интернет только при первом запуске
+
+**Локальная разработка:**
+
+- Python 3.11+, Ollama, PostgreSQL (или только `docker compose up -d postgres`)
+
+---
+
+## Переменные окружения (опционально)
+
+Файл `.env` рядом с `docker-compose.yml`:
+
+```env
+DV_UI_PORT=8501
+DV_POSTGRES_PORT=5432
+DV_OLLAMA_PORT=11434
+DV_OLLAMA_MODEL=qwen2.5-coder:7b
+```
+
+---
+
+## GPU (NVIDIA, опционально)
+
+Добавьте в сервис `ollama` в `docker-compose.yml`:
+
+```yaml
+deploy:
+  resources:
+    reservations:
+      devices:
+        - driver: nvidia
+          count: 1
+          capabilities: [gpu]
+```
+
+Требуется [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html). На GPU классификация в **5–20×** быстрее CPU.
+
+---
+
+## Установка для локальной разработки
+
+```bash
+cd dv-agent
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[ui,dev]"
+```
+
+PostgreSQL только:
+
+```bash
+docker compose up -d postgres
+```
+
+Ollama на хосте — см. раздел ниже. **Не запускайте** host Ollama одновременно с Docker-стеком на порту 11434.
+
+---
+
+## Ollama (если работаете без Docker)
+
+```bash
+ollama pull qwen2.5-coder:7b
+sudo systemctl start ollama
+dv-agent llm-status
+```
+
+Первый запрос после старта — 2–5 мин (загрузка модели в RAM). Таймаут: `config/default.yaml` → `llm.timeout_sec` (600 сек).
+
+---
+
+## PostgreSQL
+
+| Параметр | Значение |
+|----------|----------|
+| Host | `localhost` (в Docker: `postgres`) |
+| Port | `5432` |
+| Database | `source_db` |
+| User / Password | `dv_user` / `dv_pass` |
+| Схема данных | `src` |
+| Схема разметки | `dv_meta` |
+
+```bash
+docker exec -it dv_postgres psql -U dv_user -d source_db
+dv-agent status
+```
+
+---
+
+## SQL-файлы
+
+**Поддерживается:**
+
+- `CREATE TABLE` (обязательно для парсера)
+- `INSERT` — для предпросмотра данных в UI
+- Один файл, каталог (рекурсивно), смешанный DDL+DML
+- Диалекты: postgres (по умолчанию), mysql, tsql, oracle, sqlite (`--dialect`)
+- Кодировки: UTF-8, CP1251
+
+**Где лежат:**
+
+- Примеры в Docker: `/data/sql/` → `data/sql/` на хосте
+- Upload через UI: `output/uploads/workspace/`
+- Локально по умолчанию: `../Files/Файлы к ML` (`config/default.yaml`)
+
+---
+
+## Конфигурация
+
+`config/default.yaml` (локально) / `config/docker.yaml` (Docker):
+
+```yaml
+paths:
+  sql_sources: "../Files/Файлы к ML"   # или /data/sql в Docker
+  output: "./output"
+
+llm:
+  model: qwen2.5-coder:7b
+  base_url: http://localhost:11434    # http://ollama:11434 в Docker
+  timeout_sec: 600
+  keep_alive: 30m
+```
+
+Переопределение: `DV_CONFIG_PATH=/path/to/config.yaml`
+
+---
+
+## Формат каталога разметки
+
+```json
+{
+  "table_name": "wells",
+  "column_name": "well_id",
+  "dv_type": "hub",
+  "dv_target_entity": "hub_well",
+  "dv_role": "business_key",
+  "is_business_key": true,
+  "reasoning": "PK скважины",
+  "confidence": 0.9,
+  "status": "proposed"
+}
+```
+
+Статусы: `proposed` → `approved` / `rejected`.
+
+---
+
+## Типы Data Vault
+
+| dv_type | Когда | Пример |
+|---------|-------|--------|
+| `hub` | бизнес-ключ | `well_id`, `customer_id` |
+| `satellite` | атрибуты, метрики | `name`, `oil_ton` |
+| `link` | связь между хабами | FK между сущностями |
+
+| dv_role | Описание |
+|---------|----------|
+| `business_key` | BK хаба |
+| `attribute` | описательное поле |
+| `grain_key` | зернистость (date) |
+| `link_key` | ключ связи |
+| `operational_key` | суррогатный PK источника |
+
+---
+
+## Все команды CLI
+
+| Команда | Описание |
+|---------|----------|
+| `dv-agent status` | PostgreSQL + конфиг |
+| `dv-agent llm-status` | Ollama + модель |
+| `dv-agent inspect-sql` | парсинг DDL |
+| `dv-agent propose` | классификация LLM |
+| `dv-agent export-meta` | эталон из `dv_meta` |
+| `dv-agent inspect-db` | просмотр разметки в БД |
+| `dv-agent summary` | сводка DV-сущностей |
+| `dv-agent ui` / `dv-agent-ui` | Streamlit |
+
+---
+
+## Few-shot примеры (точность LLM)
+
+Файл `config/few_shot_examples.yaml` — 4 эталона (CRM, oil wells, production, deliveries). Модель не дообучается; примеры подставляются в промпт.
+
+---
+
+## Тесты
+
+```bash
+source .venv/bin/activate
+pytest tests/ -q
+```
+
+---
+
+## Устранение неполадок
+
+### Порт 11434 занят (`address already in use`)
+
+Host Ollama конфликтует с контейнером. Используйте:
+
+```bash
+sudo docker compose down
+sudo docker compose up -d
+```
+
+Не запускайте `systemctl start ollama` параллельно с Docker-стеком.
+
+### UI: «Ollama недоступен»
+
+```bash
+docker compose ps                    # ollama — Up (healthy)?
+docker compose logs ollama --tail 30
+docker compose exec ollama ollama list
+docker exec dv_ui python -c "
+from dv_agent.ui.services import llm_status
+from dv_agent.config import load_config
+print(llm_status(load_config()))
+"
+```
+
+Если контейнер `ollama` без сети — пересоздайте:
+
+```bash
+sudo docker compose up -d ollama --force-recreate
+```
+
+### Модель не загружена
+
+```bash
+docker compose logs ollama-init
+docker compose exec ollama ollama pull qwen2.5-coder:7b
+```
+
+### Таймаут LLM
+
+- На CPU: 5–15 мин на таблицу — нормально
+- Увеличьте таймаут в UI или: `dv-agent propose --timeout 900`
+- Классифицируйте по одной таблице: `-t table_name`
+- Частичный результат остаётся в `output/classification_proposed.json`
+
+### PostgreSQL недоступен
+
+```bash
+docker compose up -d postgres
+docker compose ps postgres
+```
+
+### SQL не найден
+
+Укажите путь явно: `-p /полный/путь/` или загрузите через UI.
+
+---
+
+## Ускорение LLM
+
+| Способ | Эффект |
+|--------|--------|
+| GPU (NVIDIA) | 5–20× быстрее |
+| Модель `qwen2.5-coder:3b` | быстрее, чуть ниже качество |
+| Одна таблица за раз | меньше риск timeout |
+| `keep_alive: 30m` | модель не выгружается между таблицами |
+| Не делать `docker compose stop ollama` между таблицами | сохраняется прогрев |
+
+---
+
+## Дорожная карта
+
+- [ ] Генератор DDL Raw Vault по `approved`-разметке
+- [ ] Загрузка staging / raw vault в PostgreSQL (схема `rv`)

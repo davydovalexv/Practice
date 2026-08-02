@@ -1,0 +1,33 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Результаты работы агента (генерируются локально)
+output/*
+!output/.gitkeep
+
+# Секреты и локальные настройки
+.env
+.env.local
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Cursor
+.cursor/
+
+# Docker volumes (если случайно скопированы)
+postgres_data/
+ollama_data/
